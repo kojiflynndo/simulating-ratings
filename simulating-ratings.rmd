@@ -1,0 +1,720 @@
+---
+title: "Simulating the Robustness of Various Combination Algorithms for Funding Opportunity Cost-Effectiveness"
+author: "Koji Flynn-Do"
+date: "August 2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE) 
+knitr::opts_chunk$set(warning = FALSE) 
+knitr::opts_chunk$set(echo=FALSE) 
+```
+
+```{r}
+library(tidyverse)
+library(kableExtra)
+```
+
+# 1. Simulate Underlying Data
+
+I simulated 10,000 funding opportunities, each with cost-effectiveness described by 10 impact multipliers ("attributes"). The impact multiplier values are all drawn from a log-normal distribution with mean 2 and standard deviation 1.
+
+With those true impact multipliers, I computed the true rating of each funding opportunity and the true rankings. 
+
+```{r echo=T}
+set.seed(13)
+
+mean <- 2
+sd <- 1
+
+log_mean <- log(mean^2 / sqrt(sd^2 + mean^2))
+log_shape <- sqrt(log(1 + (sd^2 / mean^2)))
+
+n = 10000
+
+components_str <- c("a", "b", "c", "d", "e", "f", "g", "h", "i", "j")
+
+for (component in components_str) {
+  assign(x = component,
+         value = rlnorm(n = n,
+                 meanlog = log_mean,
+                 sdlog = log_shape))
+}
+
+components <- c(a, b, c, d, e, f, g, h, i, j)
+
+# true rating if the data generating process is multiplicative
+true.product.rating <- a*b*c*d*e * f*g*h*i*j 
+
+# true rating is the data generating process is multiplicative and additive
+true.mixed.rating <- a*b*c*d*e + 5*f*g*h*i*j 
+
+
+ratings <- list(true.product.rating, true.mixed.rating)
+
+# for (r in ratings) {
+#   
+#   cat('mean: ', mean(r), ', median: ', median(r), ', sd: ', sd(r), '\n\n')
+# }
+
+
+df <- data.frame(a, b, c, d, e, f, g, h, i, j, true.product.rating, true.mixed.rating)
+ 
+df['true.rank.product'] <- rank(-df$true.product.rating)
+df['true.rank.mixed'] <- rank(-df$true.mixed.rating)
+```
+
+```{r}
+qplot(df$a, bins = 100) +
+  theme_bw() + theme(text = element_text(family = 'serif', size = 12)) +
+  labs(title = "The True Distribution of Values for Each Impact Multiplier")
+
+
+qplot(df$true.product.rating %>% log, bins = 100) +
+  theme_bw() + theme(text = element_text(family = 'serif', size = 12)) +
+  labs(title = "The True Distribution of Logged Funding Opportunity Ratings")
+
+qplot(df$true.product.rating, bins = 100) +
+  theme_bw() + theme(text = element_text(family = 'serif', size = 12)) +
+  labs(title = "The True Distribution of Funding Opportunity Ratings ")
+```
+
+
+# 2. Simulate Noisy Measurements of Each Attribute
+
+I simulate various kinds of noise to see if the results are different. 
+
+- One version has noise *inversely proportional to the true value*. Maybe larger values should have smaller noise, since bigger multipliers seem like they should be easier to detect. 
+
+- Another version has *noise equal to the square root of the true value*. I don't have a motivating causal model for this, I just thought it'd be worth checking. 
+
+- The final three have *constant noise*, no matter the true value of the specific attribute. The first of these has *sd = 0.125*, the second has *sd = 0.25*, and the third has *sd = 1*. Recall that each attribute is lognormally distributed with a mean of 2 and a standard deviation of 1.
+
+```{r}
+for (component in components_str) {
+  
+  mean.temp <- as.numeric(unlist(df[component]))
+  
+  mean.log.temp <- log(mean.temp^2 / sqrt(sd^2 + mean.temp^2))
+  
+  # inversely proportional
+  prop_col <- paste(component, "p", sep = '.')
+  prop <- rlnorm(n = n,
+                        meanlog = mean.log.temp,
+                        sdlog = sqrt(log(1 + ( (1/mean.temp)^2 / mean.temp^2)))
+                     )
+  df[prop_col] <- prop
+  
+  # sqrt
+  sqrt_col <- paste(component, "s", sep = '.')
+  sqrt <- rlnorm(n = n,
+                      meanlog = mean.log.temp,
+                      sdlog = sqrt(log(1 + ( (mean.temp**0.5)^2 / mean.temp^2)))
+                     )
+  df[sqrt_col] <- sqrt
+  
+  # 0.125
+  eighth_col <- paste(component, "e", sep = '.')
+  eighth <- rlnorm(n = n,
+                      meanlog = mean.log.temp,
+                      sdlog = sqrt(log(1 + ((0.125)^2 / mean.temp^2)))
+                     )
+  
+  df[eighth_col] <- eighth
+  
+  # 0.25
+  quarter_col <- paste(component, "q", sep = '.')
+  quarter <- rlnorm(n = n,
+                      meanlog = mean.log.temp,
+                      sdlog = sqrt(log(1 + ((0.25)^2 / mean.temp^2)))
+                     )
+  df[quarter_col] <- quarter
+  
+  # 1
+  one_col <- paste(component, "o", sep = '.')
+  one <- rlnorm(n = n,
+                      meanlog = mean.log.temp,
+                      sdlog = sqrt(log(1 + ((1)^2 / mean.temp^2)))
+                     )
+  df[one_col] <- one
+}
+```
+
+# 3. Apply Various Combination Rules to Get Ratings and Rankings
+
+For each noise-scenario, I combine the noisy estimates to get ratings in two ways:
+
+- Adding all the terms together
+
+- Multiplying all the terms together
+
+Then, for each true underlying data-generating process, I compute the difference between the rank given by each combination rule and the true rank.
+
+- Noise Inversely Proportional to True Value (`.p`)
+
+```{r}
+# rating given by adding and multiplying
+df['add.p'] <- df$a.p + df$b.p + df$c.p + df$d.p + df$e.p + df$f.p + df$g.p + df$h.p + df$i.p + df$j.p
+df['mult.p'] <- df$a.p * df$b.p * df$c.p * df$d.p * df$e.p * df$f.p * df$g.p * df$h.p * df$i.p * df$j.p
+
+# ranking given by adding and multiplying
+df['add.rank.p'] <- rank(-df$add.p)
+df['mult.rank.p'] <- rank(-df$mult.p)
+
+# the ranking error for each method for each true underlying process
+df['add.rank.diff.p.product'] <- df['true.rank.product'] - df['add.rank.p']
+df['mult.rank.diff.p.product'] <- df['true.rank.product'] - df['mult.rank.p']
+
+df['add.rank.diff.p.mixed'] <- df['true.rank.mixed'] - df['add.rank.p']
+df['mult.rank.diff.p.mixed'] <- df['true.rank.mixed'] - df['mult.rank.p']
+```
+
+- Noise Equal to Square Root of True Value (`.s`)
+
+```{r}
+# rating given by adding and multiplying
+df['add.s'] <- df$a.s + df$b.s + df$c.s + df$d.s + df$e.s + df$f.s + df$g.s + df$h.s + df$i.s + df$j.s
+df['mult.s'] <- df$a.s * df$b.s * df$c.s * df$d.s * df$e.s * df$f.s * df$g.s * df$h.s * df$i.s * df$j.s
+
+# ranking given by adding and multiplying
+df['add.rank.s'] <- rank(-df$add.s)
+df['mult.rank.s'] <- rank(-df$mult.s)
+
+# the ranking error for each method for each true underlying process
+df['add.rank.diff.s.product'] <- df['true.rank.product'] - df['add.rank.s']
+df['mult.rank.diff.s.product'] <- df['true.rank.product'] - df['mult.rank.s']
+
+df['add.rank.diff.s.mixed'] <- df['true.rank.mixed'] - df['add.rank.s']
+df['mult.rank.diff.s.mixed'] <- df['true.rank.mixed'] - df['mult.rank.s']
+```
+
+- Constant Noise 0.125 (`e`)
+
+```{r}
+# rating given by adding and multiplying
+df['add.e'] <- df$a.e + df$b.e + df$c.e + df$d.e + df$e.e + df$f.e + df$g.e + df$h.e + df$i.e + df$j.e
+df['mult.e'] <- df$a.e * df$b.e * df$c.e * df$d.e * df$e.e * df$f.e * df$g.e * df$h.e * df$i.e * df$j.e
+
+# ranking given by adding and multiplying
+df['add.rank.e'] <- rank(-df$add.e)
+df['mult.rank.e'] <- rank(-df$mult.e)
+
+# the ranking error for each method for each true underlying process
+df['add.rank.diff.e.product'] <- df['true.rank.product'] - df['add.rank.e']
+df['mult.rank.diff.e.product'] <- df['true.rank.product'] - df['mult.rank.e']
+
+df['add.rank.diff.e.mixed'] <- df['true.rank.mixed'] - df['add.rank.e']
+df['mult.rank.diff.e.mixed'] <- df['true.rank.mixed'] - df['mult.rank.e']
+```
+
+- Constant Noise 0.25 (`q`)
+
+```{r}
+# rating given by adding and multiplying
+df['add.q'] <- df$a.q + df$b.q + df$c.q + df$d.q + df$e.q + df$f.q + df$g.q + df$h.q + df$i.q + df$j.q
+df['mult.q'] <- df$a.q * df$b.q * df$c.q * df$d.q * df$e.q * df$f.q * df$g.q * df$h.q * df$i.q * df$j.q
+
+# ranking given by adding and multiplying
+df['add.rank.q'] <- rank(-df$add.q)
+df['mult.rank.q'] <- rank(-df$mult.q)
+
+# the ranking error for each method for each true underlying process
+df['add.rank.diff.q.product'] <- df['true.rank.product'] - df['add.rank.q']
+df['mult.rank.diff.q.product'] <- df['true.rank.product'] - df['mult.rank.q']
+
+df['add.rank.diff.q.mixed'] <- df['true.rank.mixed'] - df['add.rank.q']
+df['mult.rank.diff.q.mixed'] <- df['true.rank.mixed'] - df['mult.rank.q']
+```
+
+- Constant Noise 1 (`o`)
+
+```{r}
+# rating given by adding and multiplying
+df['add.o'] <- df$a.o + df$b.o + df$c.o + df$d.o + df$e.o + df$f.o + df$g.o + df$h.o + df$i.o + df$j.o
+df['mult.o'] <- df$a.o * df$b.o * df$c.o * df$d.o * df$e.o * df$f.o * df$g.o * df$h.o * df$i.o * df$j.o
+
+# ranking given by adding and multiplying
+df['add.rank.o'] <- rank(-df$add.o)
+df['mult.rank.o'] <- rank(-df$mult.o)
+
+# the ranking error for each method for each true underlying process
+df['add.rank.diff.o.product'] <- df['true.rank.product'] - df['add.rank.o']
+df['mult.rank.diff.o.product'] <- df['true.rank.product'] - df['mult.rank.o']
+
+df['add.rank.diff.o.mixed'] <- df['true.rank.mixed'] - df['add.rank.o']
+df['mult.rank.diff.o.mixed'] <- df['true.rank.mixed'] - df['mult.rank.o']
+```
+
+# 4. Compare Performance of Combination Rules In Different Scenarios
+
+## a. The Underlying True Ratings Are the Product
+
+Here, the true cost-effectiveness is given by the product of all ten attributes.
+
+I check the performance of the additive and multiplicative models in each noise scenario and at three percentiles: all the funding opportunities, the top 10% of funding opportunities (by *true* rating), and the top 1% of funding opportunities (by *true* rating).
+
+### Standard Error of the Ranking
+
+This is an ordinal consideration. Note that there are 10,000 synthetic funding opportunities, so the top 1% is 100 funding opportunities. We get the standard error by taking standard deviation of the ranking error (the difference between the ranking given and the true ranking).
+
+```{r}
+top1.product <- df[df$true.rank.product < 101, ]
+top10.product <- df[df$true.rank.product < 1001, ]
+```
+
+```{r}
+p.column.product.ordinal <- c(df$mult.rank.diff.p.product %>% sd(), 
+                              df$add.rank.diff.p.product %>% sd(),
+                              
+                              top10.product$mult.rank.diff.p.product %>% sd(),
+                              top10.product$add.rank.diff.p.product %>% sd(),
+                              
+                              top1.product$mult.rank.diff.p.product %>% sd(),
+                              top1.product$add.rank.diff.p.product %>% sd()
+)
+
+s.column.product.ordinal <- c(df$mult.rank.diff.s.product %>% sd(), 
+                              df$add.rank.diff.s.product %>% sd(),
+                              
+                              top10.product$mult.rank.diff.s.product %>% sd(),
+                              top10.product$add.rank.diff.s.product %>% sd(),
+                              
+                              top1.product$mult.rank.diff.s.product %>% sd(),
+                              top1.product$add.rank.diff.s.product %>% sd()
+)
+
+e.column.product.ordinal <- c(df$mult.rank.diff.e.product %>% sd(), 
+                              df$add.rank.diff.e.product %>% sd(),
+                              
+                              top10.product$mult.rank.diff.e.product %>% sd(),
+                              top10.product$add.rank.diff.e.product %>% sd(),
+                              
+                              top1.product$mult.rank.diff.e.product %>% sd(),
+                              top1.product$add.rank.diff.e.product %>% sd()
+)
+
+q.column.product.ordinal <- c(df$mult.rank.diff.q.product %>% sd(), 
+                              df$add.rank.diff.q.product %>% sd(),
+                              
+                              top10.product$mult.rank.diff.q.product %>% sd(),
+                              top10.product$add.rank.diff.q.product %>% sd(),
+                              
+                              top1.product$mult.rank.diff.q.product %>% sd(),
+                              top1.product$add.rank.diff.q.product %>% sd()
+)
+
+o.column.product.ordinal <- c(df$mult.rank.diff.o.product %>% sd(), 
+                              df$add.rank.diff.o.product %>% sd(),
+                              
+                              top10.product$mult.rank.diff.o.product %>% sd(),
+                              top10.product$add.rank.diff.o.product %>% sd(),
+                              
+                              top1.product$mult.rank.diff.o.product %>% sd(),
+                              top1.product$add.rank.diff.o.product %>% sd()
+)
+
+product.standard.error.df <- data.frame(
+  p.column.product.ordinal,
+  s.column.product.ordinal,
+  e.column.product.ordinal,
+  q.column.product.ordinal,
+  o.column.product.ordinal
+)
+```
+
+```{r}
+rownames(product.standard.error.df) <- c(
+  "Multiplicative ",
+  "Additive ",
+  "Multiplicative  ",
+  "Additive  ",
+  "Multiplicative   ",
+  "Additive   "
+)
+
+kbl(
+  product.standard.error.df %>% round(digits = 0),
+  col.names = c("Inv. Prop.",
+                "Square Root",
+                "0.125",
+                "0.25",
+                "1"),
+  caption = paste("The SE of the ranking, so 10 means ranking is off by 10 spots on average. True data structure is multiplicative","Attribute Mean, SD:", mean, sd)) %>% 
+  kable_paper("striped") %>% 
+  pack_rows("All Funding Opportunities", 1, 2) %>% 
+  pack_rows("Top 10%", 3, 4) %>% 
+  pack_rows("Top 1%", 5, 6)
+```
+
+### Correlation of Ratings With True Ratings
+
+```{r}
+p.column.product.correlation <- c( cor(df$mult.p %>% log, df$true.product.rating %>% log), 
+                                   cor(df$add.p %>% log, df$true.product.rating %>% log),
+                                   
+                                   cor(top10.product$mult.p %>% log, top10.product$true.product.rating%>% log),
+                                   cor(top10.product$add.p %>% log, top10.product$true.product.rating %>% log),
+
+                                   cor(top1.product$mult.p %>% log, top1.product$true.product.rating %>% log),
+                                   cor(top1.product$add.p %>% log, top1.product$true.product.rating %>% log)
+                                   
+)
+
+s.column.product.correlation <- c( cor(df$mult.s %>% log, df$true.product.rating %>% log), 
+                                   cor(df$add.s %>% log, df$true.product.rating %>% log),
+                                   
+                                   cor(top10.product$mult.s %>% log,  top10.product$true.product.rating %>% log),
+                                   cor(top10.product$add.s %>% log,  top10.product$true.product.rating %>% log),
+                                   
+                                   cor(top1.product$mult.s %>% log,  top1.product$true.product.rating %>% log),
+                                   cor(top1.product$add.s %>% log,  top1.product$true.product.rating %>% log)
+                                   
+)
+
+e.column.product.correlation <- c( cor(df$mult.e %>% log, df$true.product.rating %>% log), 
+                                   cor(df$add.e %>% log, df$true.product.rating %>% log),
+                                   
+                                   cor(top10.product$mult.e %>% log, top10.product$true.product.rating %>% log),
+                                   cor(top10.product$add.e %>% log, top10.product$true.product.rating %>% log),
+                                   
+                                   cor(top1.product$mult.e %>% log, top1.product$true.product.rating %>% log),
+                                   cor(top1.product$add.e %>% log, top1.product$true.product.rating %>% log)
+                                   
+)
+
+q.column.product.correlation <- c( cor(df$mult.q %>% log, df$true.product.rating %>% log), 
+                                   cor(df$add.q %>% log, df$true.product.rating %>% log),
+                                   
+                                   cor(top10.product$mult.q %>% log, top10.product$true.product.rating %>% log),
+                                   cor(top10.product$add.q %>% log, top10.product$true.product.rating %>% log),
+                                   
+                                   cor(top1.product$mult.q %>% log, top1.product$true.product.rating %>% log),
+                                   cor(top1.product$add.q %>% log, top1.product$true.product.rating %>% log)
+                                   
+)
+
+o.column.product.correlation <- c( cor(df$mult.o %>% log, df$true.product.rating %>% log), 
+                                   cor(df$add.o %>% log, df$true.product.rating %>% log),
+                                   
+                                   cor(top10.product$mult.o %>% log, top10.product$true.product.rating %>% log),
+                                   cor(top10.product$add.o %>% log, top10.product$true.product.rating %>% log),
+                                   
+                                   cor(top1.product$mult.o %>% log, top1.product$true.product.rating %>% log),
+                                   cor(top1.product$add.o %>% log, top1.product$true.product.rating %>% log)
+                                   
+)
+
+product.correlation.df <- data.frame(
+  p.column.product.correlation,
+  s.column.product.correlation,
+  q.column.product.correlation,
+  e.column.product.correlation,
+  o.column.product.correlation
+)
+
+rownames(product.correlation.df) <- c(
+  "Multiplicative ",
+  "Additive ",
+  
+  "Multiplicative  ",
+  "Additive  ",
+  
+  "Multiplicative   ",
+  "Additive   "
+)
+  
+  
+
+kbl(
+  product.correlation.df %>% round(digits = 2),
+  col.names = c("Inv. Prop.",
+                "Square Root",
+                "0.125",
+                "0.25",
+                "1"),
+  caption = paste("Correlation Between Log(True Ratings) and Log(Estimates). True Data Structure is Multiplicative","Attribute Mean, SD:", mean, sd)) %>% 
+  kable_paper("striped") %>% 
+  pack_rows("All Funding Opportunities", 1, 2) %>% 
+  pack_rows("Top 10%", 3, 4) %>% 
+  pack_rows("Top 1%", 5, 6)
+```
+
+## b. The Underlying True Ratings Are Mixed
+
+Here, the true cost-effectiveness is given by the product of the first five attributes and 5 times the product of the last five attributes. I'm just doing the exact same thing as above.
+
+### Standard Error of the Ranking
+
+```{r}
+top1.mixed <- df[df$true.rank.mixed < 101, ]
+top10.mixed <- df[df$true.rank.mixed < 1001, ]
+```
+
+```{r}
+p.column.mixed.ordinal <- c(df$mult.rank.diff.p.mixed %>% sd(), 
+                              df$add.rank.diff.p.mixed %>% sd(),
+                              
+                              top10.mixed$mult.rank.diff.p.mixed %>% sd(),
+                              top10.mixed$add.rank.diff.p.mixed %>% sd(),
+                              
+                              top1.mixed$mult.rank.diff.p.mixed %>% sd(),
+                              top1.mixed$add.rank.diff.p.mixed %>% sd()
+)
+
+s.column.mixed.ordinal <- c(df$mult.rank.diff.s.mixed %>% sd(), 
+                              df$add.rank.diff.s.mixed %>% sd(),
+                              
+                              top10.mixed$mult.rank.diff.s.mixed %>% sd(),
+                              top10.mixed$add.rank.diff.s.mixed %>% sd(),
+                              
+                              top1.mixed$mult.rank.diff.s.mixed %>% sd(),
+                              top1.mixed$add.rank.diff.s.mixed %>% sd()
+)
+
+e.column.mixed.ordinal <- c(df$mult.rank.diff.e.mixed %>% sd(), 
+                              df$add.rank.diff.e.mixed %>% sd(),
+                              
+                              top10.mixed$mult.rank.diff.e.mixed %>% sd(),
+                              top10.mixed$add.rank.diff.e.mixed %>% sd(),
+                              
+                              top1.mixed$mult.rank.diff.e.mixed %>% sd(),
+                              top1.mixed$add.rank.diff.e.mixed %>% sd()
+)
+
+q.column.mixed.ordinal <- c(df$mult.rank.diff.q.mixed %>% sd(), 
+                              df$add.rank.diff.q.mixed %>% sd(),
+                              
+                              top10.mixed$mult.rank.diff.q.mixed %>% sd(),
+                              top10.mixed$add.rank.diff.q.mixed %>% sd(),
+                              
+                              top1.mixed$mult.rank.diff.q.mixed %>% sd(),
+                              top1.mixed$add.rank.diff.q.mixed %>% sd()
+)
+
+o.column.mixed.ordinal <- c(df$mult.rank.diff.o.mixed %>% sd(), 
+                              df$add.rank.diff.o.mixed %>% sd(),
+                              
+                              top10.mixed$mult.rank.diff.o.mixed %>% sd(),
+                              top10.mixed$add.rank.diff.o.mixed %>% sd(),
+                              
+                              top1.mixed$mult.rank.diff.o.mixed %>% sd(),
+                              top1.mixed$add.rank.diff.o.mixed %>% sd()
+)
+
+mixed.standard.error.df <- data.frame(
+  p.column.mixed.ordinal,
+  s.column.mixed.ordinal,
+  e.column.mixed.ordinal,
+  q.column.mixed.ordinal,
+  o.column.mixed.ordinal
+)
+```
+
+```{r}
+rownames(mixed.standard.error.df) <- c(
+  "Multiplicative ",
+  "Additive ",
+  "Multiplicative  ",
+  "Additive  ",
+  "Multiplicative   ",
+  "Additive   "
+)
+
+kbl(
+  mixed.standard.error.df %>% round(digits = 0),
+  col.names = c("Inv. Prop.",
+                "Square Root",
+                "0.125",
+                "0.25",
+                "1"),
+  caption = paste("The SE of the ranking, so 10 means ranking is off by 10 spots on average. True data structure is mixed.","Attribute Mean, SD:", mean, sd)) %>% 
+  kable_paper("striped") %>% 
+  pack_rows("All Funding Opportunities", 1, 2) %>% 
+  pack_rows("Top 10%", 3, 4) %>% 
+  pack_rows("Top 1%", 5, 6)
+```
+
+### Correlation of Ratings With True Ratings
+
+```{r}
+p.column.mixed.correlation <- c( cor(df$mult.p %>% log, df$true.mixed.rating %>% log), 
+                                   cor(df$add.p %>% log, df$true.mixed.rating %>% log),
+                                   
+                                   cor(top10.mixed$mult.p %>% log, top10.mixed$true.mixed.rating%>% log),
+                                   cor(top10.mixed$add.p %>% log, top10.mixed$true.mixed.rating %>% log),
+
+                                   cor(top1.mixed$mult.p %>% log, top1.mixed$true.mixed.rating %>% log),
+                                   cor(top1.mixed$add.p %>% log, top1.mixed$true.mixed.rating %>% log)
+                                   
+)
+
+s.column.mixed.correlation <- c( cor(df$mult.s %>% log, df$true.mixed.rating %>% log), 
+                                   cor(df$add.s %>% log, df$true.mixed.rating %>% log),
+                                   
+                                   cor(top10.mixed$mult.s %>% log,  top10.mixed$true.mixed.rating %>% log),
+                                   cor(top10.mixed$add.s %>% log,  top10.mixed$true.mixed.rating %>% log),
+                                   
+                                   cor(top1.mixed$mult.s %>% log,  top1.mixed$true.mixed.rating %>% log),
+                                   cor(top1.mixed$add.s %>% log,  top1.mixed$true.mixed.rating %>% log)
+                                   
+)
+
+e.column.mixed.correlation <- c( cor(df$mult.e %>% log, df$true.mixed.rating %>% log), 
+                                   cor(df$add.e %>% log, df$true.mixed.rating %>% log),
+                                   
+                                   cor(top10.mixed$mult.e %>% log, top10.mixed$true.mixed.rating %>% log),
+                                   cor(top10.mixed$add.e %>% log, top10.mixed$true.mixed.rating %>% log),
+                                   
+                                   cor(top1.mixed$mult.e %>% log, top1.mixed$true.mixed.rating %>% log),
+                                   cor(top1.mixed$add.e %>% log, top1.mixed$true.mixed.rating %>% log)
+                                   
+)
+
+q.column.mixed.correlation <- c( cor(df$mult.q %>% log, df$true.mixed.rating %>% log), 
+                                   cor(df$add.q %>% log, df$true.mixed.rating %>% log),
+                                   
+                                   cor(top10.mixed$mult.q %>% log, top10.mixed$true.mixed.rating %>% log),
+                                   cor(top10.mixed$add.q %>% log, top10.mixed$true.mixed.rating %>% log),
+                                   
+                                   cor(top1.mixed$mult.q %>% log, top1.mixed$true.mixed.rating %>% log),
+                                   cor(top1.mixed$add.q %>% log, top1.mixed$true.mixed.rating %>% log)
+                                   
+)
+
+o.column.mixed.correlation <- c( cor(df$mult.o %>% log, df$true.mixed.rating %>% log), 
+                                   cor(df$add.o %>% log, df$true.mixed.rating %>% log),
+                                   
+                                   cor(top10.mixed$mult.o %>% log, top10.mixed$true.mixed.rating %>% log),
+                                   cor(top10.mixed$add.o %>% log, top10.mixed$true.mixed.rating %>% log),
+                                   
+                                   cor(top1.mixed$mult.o %>% log, top1.mixed$true.mixed.rating %>% log),
+                                   cor(top1.mixed$add.o %>% log, top1.mixed$true.mixed.rating %>% log)
+                                   
+)
+
+mixed.correlation.df <- data.frame(
+  p.column.mixed.correlation,
+  s.column.mixed.correlation,
+  q.column.mixed.correlation,
+  e.column.mixed.correlation,
+  o.column.mixed.correlation
+)
+
+rownames(mixed.correlation.df) <- c(
+  "Multiplicative ",
+  "Additive ",
+  
+  "Multiplicative  ",
+  "Additive  ",
+  
+  "Multiplicative   ",
+  "Additive   "
+)
+  
+  
+
+kbl(
+  mixed.correlation.df %>% round(digits = 2),
+  col.names = c("Inv. Prop.",
+                "Square Root",
+                "0.125",
+                "0.25",
+                "1"),
+  caption = paste("Correlation Between Log(True Ratings) and Log(Estimates). True data structure is mixed.","Attribute Mean, SD:", mean, sd)) %>% 
+  kable_paper("striped") %>% 
+  pack_rows("All Funding Opportunities", 1, 2) %>% 
+  pack_rows("Top 10%", 3, 4) %>% 
+  pack_rows("Top 1%", 5, 6)
+```
+
+# 5. Some Charts
+
+I think that the first situation, where noise is inversely proportional to the size of the multiplier, is the most like the one we're in. 
+
+```{r}
+ggplot(data = df,
+       aes(x = log(add.p), y = log(true.product.rating))) +
+  geom_point(alpha = 0.1) +
+  geom_line(method = 'lm',
+            stat = "smooth",
+            formula = y ~x,
+            alpha = 0.5,
+            color = "#21918c",
+            size = 1) +
+  theme_bw() + theme(text = element_text(family = 'serif', size = 12)) +
+  labs(title = "Additive Model w/ Inversely Proportional Noise",
+       subtitle = "All Funding Opportunities (10,000)")
+
+ggplot(data = df,
+       aes(x = log(mult.p), y = log(true.product.rating))) +
+  geom_point(alpha = 0.1) +
+  geom_line(method = 'lm',
+            stat = "smooth",
+            formula = y ~x,
+            alpha = 0.5,
+            color = "#21918c",
+            size = 1) +
+  theme_bw() + theme(text = element_text(family = 'serif', size = 12)) +
+  labs(title = "Multiplicative Model w/ Inversely Proportional Noise",
+       subtitle = "All Funding Opportunities (10,000)")
+```
+
+```{r}
+ggplot(data = top10.product,
+       aes(x = log(add.p), y = log(true.product.rating))) +
+  geom_point(alpha = 0.2) +
+  geom_line(method = 'lm',
+            stat = "smooth",
+            formula = y ~x,
+            alpha = 0.5,
+            color = "#21918c",
+            size = 1) +
+  theme_bw() + theme(text = element_text(family = 'serif', size = 12)) +
+  labs(title = "Additive Model w/ Inversely Proportional Noise",
+       subtitle = "Top 10% of Funding Opportunities (1,000)")
+
+ggplot(data = top10.product,
+       aes(x = log(mult.p), y = log(true.product.rating))) +
+  geom_point(alpha = 0.2) +
+  geom_line(method = 'lm',
+            stat = "smooth",
+            formula = y ~x,
+            alpha = 0.5,
+            color = "#21918c",
+            size = 1) +
+  theme_bw() + theme(text = element_text(family = 'serif', size = 12)) +
+  labs(title = "Multiplicative Model w/ Inversely Proportional Noise",
+       subtitle = "Top 10% of Funding Opportunities (1,000)")
+```
+
+```{r}
+ggplot(data = top1.product,
+       aes(x = log(add.p), y = log(true.product.rating))) +
+  geom_point(alpha = 0.3) +
+  geom_line(method = 'lm',
+            stat = "smooth",
+            formula = y ~x,
+            alpha = 0.5,
+            color = "#21918c",
+            size = 1) +
+  theme_bw() + theme(text = element_text(family = 'serif', size = 12)) +
+  labs(title = "Additive Model w/ Inversely Proportional Noise",
+       subtitle = "Top 1% of Funding Opportunities (1000)")
+
+ggplot(data = top1.product,
+       aes(x = log(mult.p), y = log(true.product.rating))) +
+  geom_point(alpha = 0.3) +
+  geom_line(method = 'lm',
+            stat = "smooth",
+            formula = y ~x,
+            alpha = 0.5,
+            color = "#21918c",
+            size = 1) +
+  theme_bw() + theme(text = element_text(family = 'serif', size = 12)) +
+  labs(title = "Multiplicative Model w/ Inversely Proportional Noise",
+       subtitle = "Top 1% of Funding Opportunities (1000)")
+```
+
